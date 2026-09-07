@@ -23,7 +23,8 @@ to vitest (kept as the prototype's test runner, matching the repo standard).
 
 ## Files Changed
 
-102 files changed (+16218 / -3692) across `prototypes/ansari-expo/`:
+100 files changed (+15829 / -3692) across `prototypes/ansari-expo/`
+(104 files / +16442 / -3692 for the whole PR, including `codev/`):
 
 - `app/` — replaced `_layout.tsx`, `index.tsx`, `chat/[id].tsx`,
   `+not-found.tsx`; added `about.tsx`; deleted `login.tsx`, `register.tsx`.
@@ -45,7 +46,8 @@ to vitest (kept as the prototype's test runner, matching the repo standard).
   `lib/chat-reconcile.ts`, `lib/chat-trace.ts`, `lib/sample-citations.ts`,
   `lib/suggested-topics.ts` untouched.
 - `assets/` — redrawn icon, new adaptive/splash icon set, `icon-source/`,
-  updated ambient-shadow video/poster set.
+  updated ambient-shadow `.mp4`/`.webm` files (poster JPGs turned out
+  byte-identical to source, not actually changed).
 - `app.json`, `tsconfig.json`, `metro.config.js`, `package.json` — merged
   splash/adaptive-icon config, `@workspace/api-client-react` path alias +
   Metro resolver entry, `@react-navigation/native`, `expo-navigation-bar`,
@@ -175,6 +177,32 @@ the cold `arch.md` sections they map to) changed.
   `useCreateConversation`/`useListSuggestedQuestions` network calls fail
   (no real base URL configured) — both called out in the README rather than
   silently left for someone to discover.
+
+### 3-way consultation findings (all COMMENT/APPROVE, none blocking)
+
+- **Gemini lane skipped** (`agy` CLI not installed in this environment) —
+  environment limitation, not a finding about the change itself.
+- **Codex (COMMENT) + Claude (APPROVE)** independently re-ran
+  `pnpm typecheck`/`pnpm test`/`expo export` and confirmed port fidelity via
+  their own `diff` against the Replit source. Two factual corrections they
+  caught in this review file's first draft, now fixed: the file-count/diff
+  stat above (was scoped incorrectly), and the "updated poster" claim (the
+  poster JPGs are byte-identical to source — not actually changed).
+- **Plan-wording nit (implementation is correct, plan text overstated it):**
+  the plan's app.json bullet says "root + ios/android/web
+  `backgroundColor: #E7E5E4`," but Replit's own `app.json` only sets
+  `backgroundColor` at root/`android`/`web` — there's no `ios.backgroundColor`
+  key in the source, so none was added here. The shipped `app.json` matches
+  Replit's exactly; only the plan's shorthand was imprecise.
+- **Non-blocking suggestions deferred to #124** (both reviewers, consistent
+  with the plan's own "don't build out real wiring" instruction): a
+  one-line `?? process.env.EXPO_PUBLIC_API_URL` fallback in `_layout.tsx`'s
+  `setBaseUrl` call would make the new design testable against staging
+  today, at the cost of breaking byte-identity with the Replit source —
+  deliberately not done here so the port stays a clean diff against
+  upstream; `assets/icon-source/`'s ~2.7 MB of Figma PNGs are design inputs
+  rather than runtime assets (plan-listed; whether they belong in git long
+  term is a repo-hygiene call for #124, not this PR).
 
 ## How to Test Locally
 
