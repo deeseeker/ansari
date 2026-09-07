@@ -44,8 +44,8 @@ re-wiring the real-backend code back onto it. So today:
   citations do **not** work in this build. That's expected, not a bug —
   don't file it.
 
-**Re-wiring the real backend onto this design is a separate, follow-up
-issue.** Until then, this prototype is useful for reviewing the design
+**Re-wiring the real backend onto this design is tracked in issue #124.**
+Until then, this prototype is useful for reviewing the design
 itself (open it, look at the screens, toggle dark mode) — not for testing
 against staging.
 
@@ -121,9 +121,9 @@ still pass — they don't depend on anything this port changed.
 ## Auth & token storage (kept, disconnected)
 
 `lib/auth/` (token store, session context, auth API calls) is still in the
-tree for the re-wire follow-up, but nothing in the current UI mounts it —
-there's no login/register screen to trigger it. See its own code and tests
-for how it's meant to work once reconnected.
+tree for issue #124, but nothing in the current UI mounts it — there's no
+login/register screen to trigger it. See its own code and tests for how
+it's meant to work once reconnected.
 
 ## Source + SHA
 
