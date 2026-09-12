@@ -28,7 +28,7 @@ How each legacy field is handled at migration — **value derivation**, not in-p
 | Area | Legacy (`users` + JWT) | Better Auth target | Migration handling |
 |------|------------------------|--------------------|--------------------|
 | User id | UUID | UUID (`generateId = "uuid"`) | Preserved on `INSERT … SELECT` |
-| Name | `firstName` + `lastName` (nullable) | single `name` (required) | Computed at insert: concat with stated fallback when both empty |
+| Name | `firstName` + `lastName` (nullable) | single `name` (required) | See **Name derivation** below |
 | Password | `users.password_hash` | `account.password` (`providerId='credential'`) | Bcrypt hash copied; verified via dual hash hook |
 | Email verification | none | `emailVerified` + `verification` | Default/false for migrated rows unless policy adds verify later |
 | Custom columns | `isAdmin`, `systemKey`, `sessionVersion`, `source`, `registeredVia` | `additionalFields` where retained | **`system_key`, `source`, `registered_via` migrate**; **`is_admin` and `session_version` are dropped** (not carried forward) |
@@ -96,24 +96,77 @@ fields, optional `users` table name via `modelName`). Document in `arch.md`.
 
 ---
 
+## #59 scaffold disposition
+
+Issue #59 may have applied `packages/auth/drizzle/0000_better_auth_init.sql`, creating singular
+`user` (text id) plus `session` / `account` / `verification` **alongside** legacy `public.users`
+(UUID). That scaffold is **not** the cutover target.
+
+**Phase 0 (before staging backfill):**
+
+1. Regenerate `@ansari/auth` Drizzle schema with **`advanced.database.generateId = "uuid"`** and
+   **`modelName` → canonical table `users`** (or an explicitly documented staging name — see cutover
+   sequence).
+2. Replace the #59 migration path: new generated migration **drops** the four scaffold tables if they
+   exist (`user`, `session`, `account`, `verification`), then creates the UUID **`users`**-shaped
+   Better Auth tables. Environments that never applied #59 skip the drop safely via `IF EXISTS`.
+3. **No production user data** lives in the #59 `user` table at cutover; any rows there are test or
+   dev-only and are discarded with the drop. All real identities remain in legacy `public.users` until
+   the cutover window.
+
+---
+
 ## Data migration and schema consolidation
 
-Run in the **cutover window** (not as an indefinite dual-run):
+### Name derivation
 
-1. **User rows:** `INSERT … SELECT` into Better Auth's user table, preserving each row's UUID.
-   - **`name`:** derived from `first_name` / `last_name` with a stated fallback when both are empty.
-   - **`email`, `emailVerified`:** mapped per migration rules (migrated users: verification policy as
-     defined in plan).
-2. **Credentials:** For each user, insert `account` with `provider_id = 'credential'`, bcrypt hash
-   copied from `users.password_hash` into `account.password`.
-3. **`additionalFields` carried forward:** `system_key`, `source`, `registered_via` (server-owned
-   where appropriate). **Not carried:** `is_admin`, `session_version`.
-4. **FK repointing:** `threads`, `preferences`, `feedback` reference the Better Auth user table (same
-   UUID). `tokens` dropped or retired with JWT routes.
-5. **Legacy table retention:** Rename legacy `users` → **`users_legacy`**. **No Drizzle model** —
-   unreferenceable by construction. Nothing in app code or API reads it after cutover.
-6. **Drop trigger for `users_legacy`:** State explicitly in the plan (e.g. after N days with zero
-   rollback need, or after verified row-count parity audit) — not open-ended “temporarily.”
+For each legacy row, **`name`** at insert time:
+
+1. Let `combined = trim(concat(coalesce(first_name, ''), ' ', coalesce(last_name, '')))`.
+2. If `combined` is non-empty → `name = combined`.
+3. Else → `name =` the substring of `lower(email)` before the first `@`; if that is empty → **`'User'`**.
+
+This satisfies Better Auth's NOT NULL `name` without altering the legacy table.
+
+**Migrated users:** `emailVerified = false` unless a later policy explicitly grandfathers verified
+emails (default for cutover: false).
+
+### Cutover window — ordered operations
+
+Single maintenance window; **no dual-run serving**. When the canonical Better Auth table is named
+**`users`** via `modelName`, operations run in this order (same UUID values throughout):
+
+1. **Quiesce auth traffic** (deploy gate or brief read-only — plan defines mechanism).
+2. **Rename** legacy `public.users` → **`public.users_legacy`** (existing FKs on `threads`,
+   `preferences`, `feedback`, `tokens` now reference `users_legacy.id`; still valid).
+3. **Create** empty Better Auth **`public.users`** (UUID PK, BA columns + `additionalFields`).
+4. **`INSERT … SELECT`** from `users_legacy` into `users` (id, email, derived `name`, timestamps,
+   `system_key`, `source`, `registered_via`; omit `is_admin`, `session_version`).
+5. **Backfill `account`** rows (`provider_id = 'credential'`, bcrypt copy from
+   `users_legacy.password_hash`) with idempotent `ON CONFLICT` on `(user_id, provider_id)`.
+6. **`ALTER` FK constraints** on `threads`, `preferences`, `feedback` to reference **`users.id`**
+   instead of `users_legacy.id` (UUID unchanged → row data untouched). Retire or drop `tokens` with
+   JWT routes in the same window.
+7. **Deploy** app code that reads/writes only the new `users` + BA session model; **no Drizzle model**
+   for `users_legacy`.
+8. **Invalidate** all legacy JWT/`tokens` sessions; users re-authenticate via Better Auth.
+
+Rollback in this window = **restore DB snapshot** from before step 2, not continued dual auth.
+
+### Legacy retention and drop trigger
+
+After step 7, **`users_legacy` remains** as a read-only archive **only** (no app or API access).
+
+**Drop `users_legacy`** in Phase 4 when **all** of the following are true:
+
+1. **≥ 14 calendar days** since the cutover deploy completed successfully.
+2. **Row-count parity:** `count(*)` from `users_legacy` equals `count(*)` from canonical `users`
+   (by primary key set equality audit, not estimate).
+3. **No open rollback** request or incident requiring restore from pre-cutover snapshot.
+4. **Operator sign-off** recorded in the deploy runbook (human step).
+
+Then: `DROP TABLE users_legacy` in a reviewed migration — single statement, no Drizzle model ever
+added for the archive table.
 
 **Migration idempotency (required):** `account` must have a **unique constraint on
 `(user_id, provider_id)`** (today only a non-unique index on `user_id` in
@@ -273,8 +326,8 @@ Phases are **sequential preparation**, not dual-run serving:
 
 ### Phase 0 — Spike and schema
 
-UUID config; regenerate `@ansari/auth` schema; `modelName` / table naming decision; FK migration
-design; Phase 0 exit criteria green.
+UUID config; **#59 scaffold disposition** (drop text-id `user` tables, create UUID `users`); `modelName`
+decision; FK migration design; Phase 0 exit criteria green.
 
 ### Phase 1 — Prepare
 
@@ -288,14 +341,13 @@ cutover yet — validate in staging.
 
 ### Phase 3 — Cutover
 
-Deploy: repoint FKs; switch API middleware to BA sessions; **invalidate all legacy sessions**; route
-auth to `apps/auth`; manual admin role assignment; rename legacy table to `users_legacy` (no Drizzle
-model).
+Execute **Cutover window — ordered operations** (above) in one deploy; switch API middleware to BA
+sessions; route auth to `apps/auth`; manual admin role assignment.
 
 ### Phase 4 — Decommission
 
-Remove JWT routes, `tokens` usage, JWT env from turbo/config; drop `users_legacy` per stated trigger;
-update tests and `arch-critical.md`.
+Remove JWT routes, `tokens` usage, JWT env from turbo/config; **`DROP users_legacy`** when all four
+**Legacy retention and drop trigger** conditions are met; update tests and `arch-critical.md`.
 
 ### Phase 5 (optional) — Hosting
 
@@ -313,7 +365,7 @@ Fold auth into `apps/api` (`toNextJsHandler`); retire `apps/auth` service.
 - [ ] Adapt-vs-migrate decision documented.
 - [ ] All eight issue questions answered.
 - [ ] Single-cutover strategy explicit (no dual-run serving).
-- [ ] Data migration, FK repoint, `users_legacy` retention + drop trigger documented.
+- [ ] Data migration, FK repoint, `users_legacy` retention; **drop trigger (14d + parity + sign-off) in spec**.
 - [ ] Credential story: bcrypt copy + **permanent** dual verify + spike exit criteria.
 - [ ] Env convergence (#59) addressed.
 - [ ] `arch-critical.md` delta listed.
